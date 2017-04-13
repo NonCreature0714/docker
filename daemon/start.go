@@ -15,7 +15,6 @@ import (
 	"github.com/docker/docker/api/types"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/container"
-	"github.com/docker/docker/runconfig"
 )
 
 // ContainerStart starts a container.
@@ -119,6 +118,9 @@ func (daemon *Daemon) containerStart(container *container.Container, checkpoint 
 				container.SetExitCode(128)
 			}
 			container.ToDisk()
+
+			container.Reset(false)
+
 			daemon.Cleanup(container)
 			// if containers AutoRemove flag is set, remove it after clean up
 			if container.HostConfig.AutoRemove {
@@ -134,10 +136,6 @@ func (daemon *Daemon) containerStart(container *container.Container, checkpoint 
 	if err := daemon.conditionalMountOnStart(container); err != nil {
 		return err
 	}
-
-	// Make sure NetworkMode has an acceptable value. We do this to ensure
-	// backwards API compatibility.
-	container.HostConfig = runconfig.SetDefaultNetModeIfBlank(container.HostConfig)
 
 	if err := daemon.initializeNetworking(container); err != nil {
 		return err
@@ -159,6 +157,10 @@ func (daemon *Daemon) containerStart(container *container.Container, checkpoint 
 
 	if checkpointDir == "" {
 		checkpointDir = container.CheckpointDir()
+	}
+
+	if daemon.saveApparmorConfig(container); err != nil {
+		return err
 	}
 
 	if err := daemon.containerd.Create(container.ID, checkpoint, checkpointDir, *spec, container.InitializeStdio, createOptions...); err != nil {
@@ -186,8 +188,6 @@ func (daemon *Daemon) containerStart(container *container.Container, checkpoint 
 			errDesc += ": Are you trying to mount a directory onto a file (or vice-versa)? Check if the specified host path exists and is the expected type"
 			container.SetExitCode(127)
 		}
-
-		container.Reset(false)
 
 		return fmt.Errorf("%s", errDesc)
 	}

@@ -53,8 +53,10 @@ func newImageBuildOptions(ctx context.Context, r *http.Request) (*types.ImageBui
 	options.CgroupParent = r.FormValue("cgroupparent")
 	options.NetworkMode = r.FormValue("networkmode")
 	options.Tags = r.Form["t"]
+	options.ExtraHosts = r.Form["extrahosts"]
 	options.SecurityOpt = r.Form["securityopt"]
 	options.Squash = httputils.BoolValue(r, "squash")
+	options.Target = r.FormValue("target")
 
 	if r.Form.Get("shmsize") != "" {
 		shmSize, err := strconv.ParseInt(r.Form.Get("shmsize"), 10, 64)
@@ -84,14 +86,28 @@ func newImageBuildOptions(ctx context.Context, r *http.Request) (*types.ImageBui
 		options.Ulimits = buildUlimits
 	}
 
-	var buildArgs = map[string]string{}
+	var buildArgs = map[string]*string{}
 	buildArgsJSON := r.FormValue("buildargs")
+
+	// Note that there are two ways a --build-arg might appear in the
+	// json of the query param:
+	//     "foo":"bar"
+	// and "foo":nil
+	// The first is the normal case, ie. --build-arg foo=bar
+	// or  --build-arg foo
+	// where foo's value was picked up from an env var.
+	// The second ("foo":nil) is where they put --build-arg foo
+	// but "foo" isn't set as an env var. In that case we can't just drop
+	// the fact they mentioned it, we need to pass that along to the builder
+	// so that it can print a warning about "foo" being unused if there is
+	// no "ARG foo" in the Dockerfile.
 	if buildArgsJSON != "" {
 		if err := json.Unmarshal([]byte(buildArgsJSON), &buildArgs); err != nil {
 			return nil, err
 		}
 		options.BuildArgs = buildArgs
 	}
+
 	var labels = map[string]string{}
 	labelsJSON := r.FormValue("labels")
 	if labelsJSON != "" {

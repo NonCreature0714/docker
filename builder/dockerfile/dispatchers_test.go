@@ -9,6 +9,8 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/strslice"
+	"github.com/docker/docker/builder"
+	"github.com/docker/docker/pkg/testutil/assert"
 	"github.com/docker/go-connections/nat"
 )
 
@@ -20,7 +22,6 @@ type commandWithFunction struct {
 func TestCommandsExactlyOneArgument(t *testing.T) {
 	commands := []commandWithFunction{
 		{"MAINTAINER", func(args []string) error { return maintainer(nil, args, nil, "") }},
-		{"FROM", func(args []string) error { return from(nil, args, nil, "") }},
 		{"WORKDIR", func(args []string) error { return workdir(nil, args, nil, "") }},
 		{"USER", func(args []string) error { return user(nil, args, nil, "") }},
 		{"STOPSIGNAL", func(args []string) error { return stopSignal(nil, args, nil, "") }}}
@@ -131,27 +132,34 @@ func TestCommandseBlankNames(t *testing.T) {
 }
 
 func TestEnv2Variables(t *testing.T) {
-	variables := []string{"var1", "val1", "var2", "val2"}
+	b := newBuilderWithMockBackend()
+	b.disableCommit = true
 
-	bflags := &BFlags{}
-	config := &container.Config{}
+	args := []string{"var1", "val1", "var2", "val2"}
+	err := env(b, args, nil, "")
+	assert.NilError(t, err)
 
-	b := &Builder{flags: bflags, runConfig: config, disableCommit: true}
-
-	if err := env(b, variables, nil, ""); err != nil {
-		t.Fatalf("Error when executing env: %s", err.Error())
+	expected := []string{
+		fmt.Sprintf("%s=%s", args[0], args[1]),
+		fmt.Sprintf("%s=%s", args[2], args[3]),
 	}
+	assert.DeepEqual(t, b.runConfig.Env, expected)
+}
 
-	expectedVar1 := fmt.Sprintf("%s=%s", variables[0], variables[1])
-	expectedVar2 := fmt.Sprintf("%s=%s", variables[2], variables[3])
+func TestEnvValueWithExistingRunConfigEnv(t *testing.T) {
+	b := newBuilderWithMockBackend()
+	b.disableCommit = true
+	b.runConfig.Env = []string{"var1=old", "var2=fromenv"}
 
-	if b.runConfig.Env[0] != expectedVar1 {
-		t.Fatalf("Wrong env output for first variable. Got: %s. Should be: %s", b.runConfig.Env[0], expectedVar1)
+	args := []string{"var1", "val1"}
+	err := env(b, args, nil, "")
+	assert.NilError(t, err)
+
+	expected := []string{
+		fmt.Sprintf("%s=%s", args[0], args[1]),
+		"var2=fromenv",
 	}
-
-	if b.runConfig.Env[1] != expectedVar2 {
-		t.Fatalf("Wrong env output for second variable. Got: %s, Should be: %s", b.runConfig.Env[1], expectedVar2)
-	}
+	assert.DeepEqual(t, b.runConfig.Env, expected)
 }
 
 func TestMaintainer(t *testing.T) {
@@ -189,34 +197,67 @@ func TestLabel(t *testing.T) {
 	}
 }
 
-func TestFrom(t *testing.T) {
-	b := &Builder{flags: &BFlags{}, runConfig: &container.Config{}, disableCommit: true}
+func newBuilderWithMockBackend() *Builder {
+	b := &Builder{
+		flags:     &BFlags{},
+		runConfig: &container.Config{},
+		options:   &types.ImageBuildOptions{},
+		docker:    &MockBackend{},
+		buildArgs: newBuildArgs(make(map[string]*string)),
+	}
+	b.imageContexts = &imageContexts{b: b}
+	return b
+}
+
+func TestFromScratch(t *testing.T) {
+	b := newBuilderWithMockBackend()
 
 	err := from(b, []string{"scratch"}, nil, "")
 
 	if runtime.GOOS == "windows" {
-		if err == nil {
-			t.Fatalf("Error not set on Windows")
-		}
-
-		expectedError := "Windows does not support FROM scratch"
-
-		if !strings.Contains(err.Error(), expectedError) {
-			t.Fatalf("Error message not correct on Windows. Should be: %s, got: %s", expectedError, err.Error())
-		}
-	} else {
-		if err != nil {
-			t.Fatalf("Error when executing from: %s", err.Error())
-		}
-
-		if b.image != "" {
-			t.Fatalf("Image shoule be empty, got: %s", b.image)
-		}
-
-		if b.noBaseImage != true {
-			t.Fatalf("Image should not have any base image, got: %v", b.noBaseImage)
-		}
+		assert.Error(t, err, "Windows does not support FROM scratch")
+		return
 	}
+
+	assert.NilError(t, err)
+	assert.Equal(t, b.image, "")
+	assert.Equal(t, b.noBaseImage, true)
+}
+
+func TestFromWithArg(t *testing.T) {
+	tag, expected := ":sometag", "expectedthisid"
+
+	getImage := func(name string) (builder.Image, error) {
+		assert.Equal(t, name, "alpine"+tag)
+		return &mockImage{id: "expectedthisid"}, nil
+	}
+	b := newBuilderWithMockBackend()
+	b.docker.(*MockBackend).getImageOnBuildFunc = getImage
+
+	assert.NilError(t, arg(b, []string{"THETAG=" + tag}, nil, ""))
+	err := from(b, []string{"alpine${THETAG}"}, nil, "")
+
+	assert.NilError(t, err)
+	assert.Equal(t, b.image, expected)
+	assert.Equal(t, b.from.ImageID(), expected)
+	assert.Equal(t, len(b.buildArgs.GetAllAllowed()), 0)
+	assert.Equal(t, len(b.buildArgs.GetAllMeta()), 1)
+}
+
+func TestFromWithUndefinedArg(t *testing.T) {
+	tag, expected := "sometag", "expectedthisid"
+
+	getImage := func(name string) (builder.Image, error) {
+		assert.Equal(t, name, "alpine")
+		return &mockImage{id: "expectedthisid"}, nil
+	}
+	b := newBuilderWithMockBackend()
+	b.docker.(*MockBackend).getImageOnBuildFunc = getImage
+	b.options.BuildArgs = map[string]*string{"THETAG": &tag}
+
+	err := from(b, []string{"alpine${THETAG}"}, nil, "")
+	assert.NilError(t, err)
+	assert.Equal(t, b.image, expected)
 }
 
 func TestOnbuildIllegalTriggers(t *testing.T) {
@@ -231,7 +272,7 @@ func TestOnbuildIllegalTriggers(t *testing.T) {
 		err := onbuild(b, []string{trigger.command}, nil, "")
 
 		if err == nil {
-			t.Fatalf("Error should not be nil")
+			t.Fatal("Error should not be nil")
 		}
 
 		if !strings.Contains(err.Error(), trigger.expectedError) {
@@ -301,7 +342,7 @@ func TestCmd(t *testing.T) {
 	}
 
 	if !b.cmdSet {
-		t.Fatalf("Command should be marked as set")
+		t.Fatal("Command should be marked as set")
 	}
 }
 
@@ -365,7 +406,7 @@ func TestEntrypoint(t *testing.T) {
 	}
 
 	if b.runConfig.Entrypoint == nil {
-		t.Fatalf("Entrypoint should be set")
+		t.Fatal("Entrypoint should be set")
 	}
 
 	var expectedEntrypoint strslice.StrSlice
@@ -391,7 +432,7 @@ func TestExpose(t *testing.T) {
 	}
 
 	if b.runConfig.ExposedPorts == nil {
-		t.Fatalf("ExposedPorts should be set")
+		t.Fatal("ExposedPorts should be set")
 	}
 
 	if len(b.runConfig.ExposedPorts) != 1 {
@@ -433,7 +474,7 @@ func TestVolume(t *testing.T) {
 	}
 
 	if b.runConfig.Volumes == nil {
-		t.Fatalf("Volumes should be set")
+		t.Fatal("Volumes should be set")
 	}
 
 	if len(b.runConfig.Volumes) != 1 {
@@ -460,37 +501,18 @@ func TestStopSignal(t *testing.T) {
 }
 
 func TestArg(t *testing.T) {
-	buildOptions := &types.ImageBuildOptions{BuildArgs: make(map[string]string)}
-
-	b := &Builder{flags: &BFlags{}, runConfig: &container.Config{}, disableCommit: true, allowedBuildArgs: make(map[string]bool), options: buildOptions}
+	b := newBuilderWithMockBackend()
 
 	argName := "foo"
 	argVal := "bar"
 	argDef := fmt.Sprintf("%s=%s", argName, argVal)
 
-	if err := arg(b, []string{argDef}, nil, ""); err != nil {
-		t.Fatalf("Error should be empty, got: %s", err.Error())
-	}
+	err := arg(b, []string{argDef}, nil, "")
+	assert.NilError(t, err)
 
-	allowed, ok := b.allowedBuildArgs[argName]
-
-	if !ok {
-		t.Fatalf("%s argument should be allowed as a build arg", argName)
-	}
-
-	if !allowed {
-		t.Fatalf("%s argument was present in map but disallowed as a build arg", argName)
-	}
-
-	val, ok := b.options.BuildArgs[argName]
-
-	if !ok {
-		t.Fatalf("%s argument should be a build arg", argName)
-	}
-
-	if val != "bar" {
-		t.Fatalf("%s argument should have default value 'bar', got %s", argName, val)
-	}
+	expected := map[string]string{argName: argVal}
+	allowed := b.buildArgs.GetAllAllowed()
+	assert.DeepEqual(t, allowed, expected)
 }
 
 func TestShell(t *testing.T) {
@@ -506,7 +528,7 @@ func TestShell(t *testing.T) {
 	}
 
 	if b.runConfig.Shell == nil {
-		t.Fatalf("Shell should be set")
+		t.Fatal("Shell should be set")
 	}
 
 	expectedShell := strslice.StrSlice([]string{shellCmd})

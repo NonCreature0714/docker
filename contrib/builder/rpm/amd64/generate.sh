@@ -1,11 +1,11 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -e
 
 # usage: ./generate.sh [versions]
 #    ie: ./generate.sh
 #        to update all Dockerfiles in this directory
-#    or: ./generate.sh
-#        to only update fedora-23/Dockerfile
+#    or: ./generate.sh centos-7
+#        to only update centos-7/Dockerfile
 #    or: ./generate.sh fedora-newversion
 #        to create a new folder and a Dockerfile within it
 
@@ -60,7 +60,7 @@ for version in "${versions[@]}"; do
 	esac
 
 	case "$from" in
-		centos:*)
+		centos:*|amazonlinux:latest)
 			# get "Development Tools" packages dependencies
 			echo 'RUN yum groupinstall -y "Development Tools"' >> "$version/Dockerfile"
 
@@ -95,7 +95,6 @@ for version in "${versions[@]}"; do
 		pkgconfig # for the pkg-config command
 		selinux-policy
 		selinux-policy-devel
-		sqlite-devel # for "sqlite3.h"
 		systemd-devel # for "sd-journal.h" and libraries
 		tar # older versions of dev-tools do not have tar
 		git # required for containerd and runc clone
@@ -111,7 +110,7 @@ for version in "${versions[@]}"; do
 	esac
 
 	case "$from" in
-		oraclelinux:6)
+		oraclelinux:6|amazonlinux:latest)
 			# doesn't use systemd, doesn't have a devel package for it
 			packages=( "${packages[@]/systemd-devel}" )
 			;;
@@ -144,10 +143,6 @@ for version in "${versions[@]}"; do
 		photon:*)
 			packages=( "${packages[@]/pkgconfig/pkg-config}" )
 			echo "RUN ${installer} install -y ${packages[*]}" >> "$version/Dockerfile"
-			;;
-		centos:7)
-			echo "RUN ${installer} install -y ${packages[*]}" >> "$version/Dockerfile"
-			echo 'RUN [ `rpm -q selinux-policy-devel | grep el7_3` ] || yum -y --enablerepo=cr install selinux-policy-devel' >> "$version/Dockerfile"
 			;;
 		*)
 			echo "RUN ${installer} install -y ${packages[*]}" >> "$version/Dockerfile"
